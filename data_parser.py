@@ -1,12 +1,9 @@
-import re
-import time
+from datetime import datetime
+
 import pyspark.sql.functions as F
-from pyspark.context import SparkContext
 from pyspark.sql.types import *
-from pyspark.conf import SparkConf
 from pyspark.sql import SparkSession
 from kafka import *
-import findspark
 from pyspark.sql.functions import UserDefinedFunction
 
 import os
@@ -45,7 +42,7 @@ def connect_to_consumer(topic="test", offset='latest'):
 
 if __name__ == "__main__":
 
-    java8_location = '/Library/Java/JavaVirtualMachines/adoptopenjdk-8.jdk/Contents/Home'  # Set your own
+    java8_location = '/Library/Java/JavaVirtualMachines/adoptopenjdk-8.jdk/Contents/Home'
     os.environ['JAVA_HOME'] = java8_location
 
     spark = SparkSession.builder.appName('abc').getOrCreate()
@@ -53,32 +50,38 @@ if __name__ == "__main__":
     json_schema = StructType([
             StructField("venue", StructType([
                 StructField("venue_name", StringType(), False),
-                StructField("venue_id", FloatType(), False)
-            ]))
-            #
-            # StructField("response", StringType(), False),
-            # StructField("member", StructType([
-            #     StructField("member_id", FloatType(), False)
-            # ])),
-            #
-            # StructField("rsvp_id", FloatType(), False),
-            # StructField("event", StructType([
-            #     StructField("event_name", StringType(), False),
-            #     StructField("event_id", FloatType(), False),
-            # ])),
+                StructField("venue_id", StringType(), False)
+            ])),
 
-            # StructField("group_city", StringType(), False),
-            # StructField("group_country", StringType(), False),
-            # StructField("group_id", FloatType(), False),
-            # StructField("group_name", StringType(), False)
+            StructField("response", StringType(), False),
+            StructField("guests", IntegerType(), False),
+            StructField("member", StructType([
+                StructField("member_id", StringType(), False)
+            ])),
+
+            StructField("rsvp_id", StringType(), False),
+            StructField("event", StructType([
+                StructField("event_name", StringType(), False),
+                StructField("event_id", StringType(), False)
+            ])),
+
+            StructField("group", StructType([
+                StructField("group_city", StringType(), False),
+                StructField("group_country", StringType(), False),
+                StructField("group_id", StringType(), False),
+                StructField("group_name", StringType(), False)
+            ]))
         ])
 
     producer = connect_to_producer()
     consumer = connect_to_consumer('test', 'earliest')
 
-    udf = UserDefinedFunction(lambda x: str(x)[1:-1], StringType())
+    # Simple function to strip out the 'b' in the raw data to allow proper
+    # json -> Struct parsing.
+    udf = UserDefinedFunction(lambda x: str(x), StringType())
 
-    stream = spark \
+    # Reading from our raw data stream, so we can clean up the data
+    raw_stream = spark \
         .readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", "localhost:9092") \
@@ -86,20 +89,54 @@ if __name__ == "__main__":
         .option("subscribe", "test") \
         .load()
 
-    json_data = stream.selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)")\
-        .select(udf('value').alias('data')).select(F.from_json('data', json_schema)).writeStream.format("console") \
-        .option("truncate", "false") \
-        .start()
-
-    json_data.awaitTermination()
+    # Reading from our cleaned data stream, so we can perform analyses
+    clean_stream = spark \
+        .readStream \
+        .format("kafka") \
+        .option("kafka.bootstrap.servers", "localhost:9092") \
+        .option("startingOffsets", "latest") \
+        .option("subscribe", "clean") \
+        .load()
 
     # json_data = stream.selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)")\
-    #     .select(from_json('value', json_schema))\
-    #     .alias('meeting')\
-    #     .select('meeting.*')\
-    #     .writeStream.format("kafka")\
-    #     .option("kafka.bootstrap.servers", "localhost:9092")\
-    #     .option("topic", "clean").start()
+    #     .select(udf('value').alias('data'))\
+    #     .select(F.from_json('data', json_schema))\
+    #     .writeStream.format("console") \
+    #     .option("truncate", "false") \
+    #     .start().awaitTermination()
+
+    # Cleaning raw data.
+    json_data = raw_stream.selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)")\
+        .select(F.from_json('value', json_schema).alias('value')) \
+        .select(F.to_json('value').alias('value')) \
+        .writeStream.format("kafka")\
+        .option("kafka.bootstrap.servers", "localhost:9092")\
+        .option("checkpointLocation", "/Users/dhruv/Checkpoints")\
+        .option("topic", "clean").start()
+
+    avg_guests_per_country = clean_stream.selectExpr("CAST(value as STRING)")\
+        .select(F.from_json("value", json_schema).alias("data"))\
+        .select('data.*').select('guests', 'group.*')\
+        .groupBy('group_country')\
+        .avg('guests').alias('avg_guests')\
+        .writeStream.format('console')\
+        .option('truncate', 'false')\
+        .outputMode('complete').start()
+
+    common_countries = clean_stream.selectExpr("CAST(value as STRING)") \
+        .select(F.from_json("value", json_schema).alias("data")) \
+        .select('data.*').select('group.*') \
+        .groupBy('group_country') \
+        .count().alias('country_counts') \
+        .writeStream.format('console') \
+        .option('truncate', 'false') \
+        .outputMode('complete').start()
+
+
+
+
+
+    spark.streams.awaitAnyTermination()
 
 
 

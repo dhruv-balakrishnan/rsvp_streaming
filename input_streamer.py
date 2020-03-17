@@ -16,7 +16,7 @@ def get_producer(server='localhost:2181'):
 def publish(producer, topic="test", key="raw", value=""):
     key = bytes(key, encoding='utf-8')
     #value = bytes(value, encoding='utf-8')
-    producer.send(topic, value.encode(), key)
+    producer.send(topic, value, key)
     producer.flush
 
 
@@ -35,4 +35,4 @@ if __name__ == "__main__":
 
     for line in request.iter_lines():
         time.sleep(5)
-        publish(producer, raw_topic, raw_key, str(line))
+        publish(producer, raw_topic, raw_key, line)
